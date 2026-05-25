@@ -1,5 +1,9 @@
 # Color profiles matching game UI
-TARGET_BAR_COLOR = (50, 200, 160)  # Teal / Cyan moving target bar
+TARGET_BAR_COLOR = (
+    41,
+    200,
+    173,
+)  # Exact RGB calibration for #29c8ad (Teal/Cyan Target Bar)
 DASH_COLOR = (230, 240, 100)  # Bright Yellow / Gold slider line
 
 # Distinct bright blue inside the reward screen badge circle

@@ -7,6 +7,40 @@ from gui import AppleFishingGUI
 import keyboard
 import pydirectinput
 import random
+import os
+import logging
+import cv2
+
+# Ensure required directories exist cleanly
+os.makedirs("logs/minigame_images", exist_ok=True)
+
+
+# --- CUSTOM COLORED LOGGING FORMATTER ---
+class ColoredFormatter(logging.Formatter):
+    COLORS = {
+        "DEBUG": "\033[94m",  # Blue
+        "INFO": "\033[96m",  # Cyan
+        "WARNING": "\033[93m",  # Yellow
+        "ERROR": "\033[91m",  # Red
+        "CRITICAL": "\033[95m",  # Magenta
+    }
+    RESET = "\033[0m"
+
+    def format(self, record):
+        log_color = self.COLORS.get(record.levelname, self.RESET)
+        format_str = f"{log_color}%(asctime)s [%(levelname)s] %(message)s{self.RESET}"
+        formatter = logging.Formatter(format_str)
+        return formatter.format(record)
+
+
+# Configure structured file logging (plain text for file, colors for console)
+file_handler = logging.FileHandler("logs/execution.log", encoding="utf-8")
+file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(ColoredFormatter())
+
+logging.basicConfig(level=logging.INFO, handlers=[file_handler, stream_handler])
 
 # Persistent In-Memory Learning Parameters across runs
 LEARNING_METRICS = {
@@ -25,14 +59,16 @@ def reliable_press(key, duration=0.1):
 
 def bot_loop(status_callback):
     """
-    Optimized State-Machine Autonomous Fishing Engine with First-Frame Auto-Detection.
-    Eliminates internal bar adjustments to lock position stability and prevent overshooting.
+    State-Machine Autonomous Fishing Engine with First-Frame Auto-Detection.
+    Optimized to completely stop moving once safely inside the colored bar to prevent ping-pong looping.
     """
     pydirectinput.PAUSE = 0.001
 
     current_state = None
+    last_logged_state = None
     episode_errors = []
     lost_frames = 0
+    rounds_completed = 0
     cast_time = time.time()
 
     # Policy weights assignment
@@ -43,8 +79,17 @@ def bot_loop(status_callback):
     active_gain = current_gain * exploration_modifier
 
     vision.reset_roi()
+    logging.info(
+        "\n=========================================\n[START] Automation engine successfully initialized.\n========================================="
+    )
 
     while config.IS_RUNNING:
+        # Prevent log flooding by capturing explicit state changes only, with visual spacing
+        if current_state != last_logged_state:
+            logging.info(
+                f"\n---> STATE TRANSITION: [ {last_logged_state} ] to [ {current_state} ] <---"
+            )
+            last_logged_state = current_state
 
         # Dynamic first-frame initialization check
         if current_state is None:
@@ -97,13 +142,15 @@ def bot_loop(status_callback):
                     f"Waiting for Bite... ({time.time() - cast_time:.1f}s)", "#FF9500"
                 )
                 if time.time() - cast_time > 25.0:  # Safety timeout loop reset
+                    logging.warning(
+                        "\n[!] Bite timeout reached without response. Recasting line."
+                    )
                     current_state = "CAST"
             time.sleep(0.04)
             continue
 
         # --- STAGE 3: HIGH-SPEED TRACKING MINI-GAME ---
         if current_state == "MINIGAME":
-            # BUG FIX: Checking reward window at top of frame cycle intercepts visual false-positives
             if vision.check_reward_visible(frame):
                 controller.stop_moving()
                 current_state = "REWARD"
@@ -121,28 +168,58 @@ def bot_loop(status_callback):
                 abs_distance = abs(distance)
                 episode_errors.append(abs_distance)
 
-                # BUG FIX: Matches the exact physical boundaries of the color bar with a tiny 2% safety edge
-                SAFE_BAR_ZONE = int(target_width * 0.48)
-
-                if abs_distance <= SAFE_BAR_ZONE:
-                    # Already safely inside the colored bar; drop inputs immediately to ride it
-                    controller.stop_moving()
+                # Save sub-section cropped images for visual verification
+                if vision._roi_bbox is not None:
+                    bx = vision._roi_bbox
+                    crop_section = frame[bx[1] : bx[3], bx[0] : bx[2]]
                 else:
-                    # Outside the bar bounds; engage continuous direction tracking to catch up fast
-                    if distance > 0:
+                    crop_section = frame
+
+                img_path = f"logs/minigame_images/frame_{int(time.time() * 1000)}.jpg"
+                cv2.imwrite(img_path, crop_section)
+
+                # --- NO-PENDULUM COMFORT ZONE LOGIC ---
+                # OUTER_LIMIT: The absolute edge where we MUST press a button to avoid falling out (35% off center).
+                # INNER_LIMIT: The edge of our safe zone. Once we cross this, we let go of the button immediately (20% off center).
+                # This leaves a wide 40% gap in the middle where the bot does absolutely nothing, preventing jitter.
+                OUTER_LIMIT = int(target_width * 0.35)
+                INNER_LIMIT = int(target_width * 0.20)
+
+                active_dir = controller._active_direction
+
+                if active_dir == "left":
+                    # We are holding left. Let go as soon as we safely cross the INNER_LIMIT to prevent overshoot momentum.
+                    if distance > INNER_LIMIT:
                         controller.move_left()
                     else:
+                        controller.stop_moving()
+                elif active_dir == "right":
+                    # We are holding right. Let go as soon as we safely cross the INNER_LIMIT to prevent overshoot momentum.
+                    if distance < -INNER_LIMIT:
                         controller.move_right()
+                    else:
+                        controller.stop_moving()
+                else:
+                    # We are stationary. ONLY press a button if the line drifts dangerously close to the OUTER_LIMIT.
+                    if distance > OUTER_LIMIT:
+                        controller.move_left()
+                    elif distance < -OUTER_LIMIT:
+                        controller.move_right()
+                    else:
+                        controller.stop_moving()
 
-                time.sleep(0.001)  # Micro-sleep to preserve CPU clock cycles
+                time.sleep(0.001)  # Preserve CPU clock cycles
             else:
                 lost_frames += 1
-                if lost_frames >= 4:  # Bar is missing; mini-game has ended
+                if lost_frames >= 4:  # Bar missing; game ended
                     controller.stop_moving()
                     if vision.check_reward_visible(frame):
                         current_state = "REWARD"
                     else:
                         status_callback("Fish escaped. Resetting...", "#FF9500")
+                        logging.warning(
+                            "\n[!] Mini-game terminated: Target tracking lost (Fish Escaped)."
+                        )
                         current_state = "CAST"
             continue
 
@@ -150,7 +227,7 @@ def bot_loop(status_callback):
         if current_state == "REWARD":
             status_callback("Reward Window Detected! Dismissing [ESC]...", "#BF5AF2")
             reliable_press("escape", 0.1)
-            time.sleep(1.2)  # Wait for inventory saving screen cards to clear
+            time.sleep(1.2)  # Wait for screen cards to clear
 
             # Policy reinforcement calculation
             if len(episode_errors) > 5:
@@ -165,8 +242,11 @@ def bot_loop(status_callback):
                     LEARNING_METRICS["exploration_rate"] = max(
                         0.02, LEARNING_METRICS["exploration_rate"] - 0.01
                     )
+                    logging.info(
+                        f"    -> [AI UPDATE] New policy achieved. Gain: {LEARNING_METRICS['optimal_gain']:.4f}, Exploration: {LEARNING_METRICS['exploration_rate']:.2f}"
+                    )
 
-            # Generate new values for the next round
+            # Generate parameters for next round
             current_gain = LEARNING_METRICS["optimal_gain"]
             exploration_modifier = 1.0 + random.uniform(
                 -LEARNING_METRICS["exploration_rate"],
@@ -174,11 +254,18 @@ def bot_loop(status_callback):
             )
             active_gain = current_gain * exploration_modifier
 
+            # Increment rounds completed and log clearly separated at the end of the full cycle
+            rounds_completed += 1
+            logging.info(
+                f"\n=========================================\n[SUCCESS] Round Completed! Total Catch Count: {rounds_completed}\n========================================="
+            )
+
             current_state = "CAST"
             continue
 
     controller.stop_moving()
     status_callback("Ready", "#8E8E93")
+    logging.info("\n[STOP] Automation engine safely shut down.\n")
 
 
 if __name__ == "__main__":
