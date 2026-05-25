@@ -12,16 +12,51 @@ except:
 _roi_bbox = None
 
 
-def locate_elements():
-    """
-    Tracks elements using an optimized local sub-region window.
-    Returns (target_x, dash_x, target_width, is_reward_screen).
-    """
-    global _roi_bbox
-
+def get_screenshot():
+    """Captures the screen and transforms it into a standard BGR numpy array."""
     screenshot_raw = ImageGrab.grab()
-    screenshot = np.array(screenshot_raw)
-    frame = cv2.cvtColor(screenshot, cv2.COLOR_RGB2BGR)
+    return cv2.cvtColor(np.array(screenshot_raw), cv2.COLOR_RGB2BGR)
+
+
+def check_hook_visible(frame):
+    """High-efficiency check limited strictly to the bottom-right action quadrant."""
+    h, w, _ = frame.shape
+    tol = config.COLOR_TOLERANCE
+    r_h, g_h, b_h = config.HOOK_ICON_COLOR
+    lower_hook = np.array([max(0, b_h - tol), max(0, g_h - tol), max(0, r_h - tol)])
+    upper_hook = np.array(
+        [min(255, b_h + tol), min(255, g_h + tol), min(255, r_h + tol)]
+    )
+
+    roi_br = frame[int(h * 0.65) :, int(w * 0.65) : w]
+    mask_hook = cv2.inRange(roi_br, lower_hook, upper_hook)
+    contours_hook, _ = cv2.findContours(
+        mask_hook, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    # FIX: Lowered contour area threshold to support different screen resolutions and UI scales
+    return any(cv2.contourArea(c) > 30 for c in contours_hook)
+
+
+def check_reward_visible(frame):
+    """Scans for the reward badge presentation window."""
+    tol = config.COLOR_TOLERANCE
+    r_r, g_r, b_r = config.REWARD_BADGE_COLOR
+    lower_reward = np.array([max(0, b_r - tol), max(0, g_r - tol), max(0, r_r - tol)])
+    upper_reward = np.array(
+        [min(255, b_r + tol), min(255, g_r + tol), min(255, r_r + tol)]
+    )
+
+    mask_reward = cv2.inRange(frame, lower_reward, upper_reward)
+    contours_reward, _ = cv2.findContours(
+        mask_reward, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    return any(cv2.contourArea(c) > 2000 for c in contours_reward)
+
+
+def track_minigame(frame):
+    """Focused mini-game bar tracking. Highly optimized with local sub-regions."""
+    global _roi_bbox
 
     if _roi_bbox is not None:
         crop_frame = frame[_roi_bbox[1] : _roi_bbox[3], _roi_bbox[0] : _roi_bbox[2]]
@@ -73,34 +108,19 @@ def locate_elements():
                 cy = int(M["m01"] / M["m00"]) + offset_y
                 dash_candidates.append((cx, cy))
 
-    # Identify and verify gauge coordinates
     for tx, ty, t_contour in target_candidates:
         for dx, dy in dash_candidates:
             if abs(ty - dy) <= 20 and abs(tx - dx) <= 400:
-                # Extract the exact pixel width of the target bar
                 x, y, w, h = cv2.boundingRect(t_contour)
-
                 if _roi_bbox is None:
                     _roi_bbox = (max(0, x - 150), max(0, ty - 60), x + w + 150, ty + 60)
-
-                return tx, dx, w, False
+                return tx, dx, w
 
     _roi_bbox = None
+    return None, None, 0
 
-    # Reward screen check
-    r_r, g_r, b_r = config.REWARD_BADGE_COLOR
-    lower_reward = np.array([max(0, b_r - tol), max(0, g_r - tol), max(0, r_r - tol)])
-    upper_reward = np.array(
-        [min(255, b_r + tol), min(255, g_r + tol), min(255, r_r + tol)]
-    )
 
-    mask_reward = cv2.inRange(frame, lower_reward, upper_reward)
-    contours_reward, _ = cv2.findContours(
-        mask_reward, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
-
-    for c in contours_reward:
-        if cv2.contourArea(c) > 2000:
-            return None, None, 0, True
-
-    return None, None, 0, False
+def reset_roi():
+    """Forces an active reset of localized bounding box coordinates."""
+    global _roi_bbox
+    _roi_bbox = None

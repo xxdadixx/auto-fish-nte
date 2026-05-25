@@ -6,70 +6,178 @@ import config
 from gui import AppleFishingGUI
 import keyboard
 import pydirectinput
+import random
+
+# Persistent In-Memory Learning Parameters across runs
+LEARNING_METRICS = {
+    "optimal_gain": 1.0,
+    "best_historical_score": 9999.0,
+    "exploration_rate": 0.10,
+}
+
+
+def reliable_press(key, duration=0.1):
+    """Sends a hardware keypress with an explicit hold duration to guarantee registration."""
+    pydirectinput.keyDown(key)
+    time.sleep(duration)
+    pydirectinput.keyUp(key)
 
 
 def bot_loop(status_callback):
     """
-    Background automation loop engine using Inverse Proportional Dampening.
-    Gently slows down the tracking cursor the closer it gets to the center.
+    Optimized State-Machine Autonomous Fishing Engine with First-Frame Auto-Detection.
+    Resolves initialization confusion and locks by dynamically managing fallbacks
+    between the waiting state and active mini-games.
     """
     pydirectinput.PAUSE = 0.001
 
+    current_state = None
+    episode_errors = []
+    lost_frames = 0
+    cast_time = time.time()
+
+    # Policy weights assignment
+    current_gain = LEARNING_METRICS["optimal_gain"]
+    exploration_modifier = 1.0 + random.uniform(
+        -LEARNING_METRICS["exploration_rate"], LEARNING_METRICS["exploration_rate"]
+    )
+    active_gain = current_gain * exploration_modifier
+
+    vision.reset_roi()
+
     while config.IS_RUNNING:
-        target_x, dash_x, target_width, is_reward = vision.locate_elements()
 
-        if is_reward:
-            controller.stop_moving()
-            status_callback("Fish Caught! [F] Re-cast | [ESC] Close Window", "#BF5AF2")
-            time.sleep(0.2)
+        # Dynamic first-frame initialization check
+        if current_state is None:
+            status_callback("Syncing Game State...", "#FF9500")
+            frame = vision.get_screenshot()
+            if vision.check_reward_visible(frame):
+                current_state = "REWARD"
+            elif vision.check_hook_visible(frame):
+                current_state = "WAITING_BITE"
+                cast_time = time.time()
+            else:
+                target_x, dash_x, target_width = vision.track_minigame(frame)
+                if target_x is not None and dash_x is not None:
+                    current_state = "MINIGAME"
+                else:
+                    current_state = "CAST"
             continue
 
-        if target_x is None or dash_x is None:
+        # --- STAGE 1: CAST THE LINE ---
+        if current_state == "CAST":
             controller.stop_moving()
-            status_callback("Scanning Screen...", "#FF9500")
-            time.sleep(0.05)
+            status_callback("Casting Line Hook [F]...", "#FF9500")
+            reliable_press("f", 0.1)
+            cast_time = time.time()
+            current_state = "WAITING_BITE"
+            time.sleep(2.0)  # Allow initial animation to settle
             continue
 
-        status_callback("Active Tracking", "#34C759")
-        distance = dash_x - target_x  # Positive = Dash is right, Negative = Left
-        abs_distance = abs(distance)
+        # Fetch active screen frame to distribute to the current state check
+        frame = vision.get_screenshot()
 
-        # Dynamically scale tracking zones to accommodate narrower color bars
-        DEADZONE = max(2, int(target_width * 0.05))
-        BRAKING_ZONE = max(15, int(target_width * 0.35))
+        # --- STAGE 2: WAITING FOR BITE DIALOGUE ---
+        if current_state == "WAITING_BITE":
+            # FALLBACK FIX: If the mini-game bar became active during screen blindness,
+            # transition to MINIGAME immediately instead of locking the thread.
+            target_x, dash_x, target_width = vision.track_minigame(frame)
+            if target_x is not None and dash_x is not None:
+                current_state = "MINIGAME"
+                lost_frames = 0
+                episode_errors = []
+                continue
 
-        # CASE 1: Inside Dynamic Deadzone -> Centered Perfectly
-        if abs_distance <= DEADZONE:
-            controller.stop_moving()
-            time.sleep(0.01)  # Stay idle to let physics settle
-
-        # CASE 2: Outside Braking Zone -> Full-Throttle Sprint Mode (High Speed)
-        elif abs_distance > BRAKING_ZONE:
-            if distance > 0:
-                controller.move_left()
+            if vision.check_hook_visible(frame):
+                status_callback("Bite Detected! Hooking Fish [F]...", "#34C759")
+                reliable_press("f", 0.1)
+                current_state = "MINIGAME"
+                lost_frames = 0
+                episode_errors = []
+                time.sleep(0.8)  # Smooth transition into mini-game view layout
             else:
-                controller.move_right()
+                status_callback(
+                    f"Waiting for Bite... ({time.time() - cast_time:.1f}s)", "#FF9500"
+                )
+                if time.time() - cast_time > 25.0:  # Safety timeout loop reset
+                    current_state = "CAST"
+            time.sleep(0.04)
+            continue
 
-        # CASE 3: Inside Braking Zone -> Inverse Proportional Dampening Mode
-        else:
-            # Kill any active continuous key-holds to drop speed instantly
-            controller.stop_moving()
+        # --- STAGE 3: HIGH-SPEED TRACKING MINI-GAME ---
+        if current_state == "MINIGAME":
+            target_x, dash_x, target_width = vision.track_minigame(frame)
 
-            # Fire a single frame hardware keystroke strike (No continuous down state)
-            if distance > 0:
-                pydirectinput.press("a")
+            if target_x is not None and dash_x is not None:
+                lost_frames = 0
+                status_callback(
+                    f"Tracking Mini-Game (Gain: {active_gain:.2f})", "#34C759"
+                )
+
+                distance = dash_x - target_x
+                abs_distance = abs(distance)
+                episode_errors.append(abs_distance)
+
+                HALF_BAR_WIDTH = target_width / 2
+                DEADZONE = max(2, int(target_width * 0.04))
+
+                if abs_distance <= DEADZONE:
+                    controller.stop_moving()
+                    time.sleep(0.004)
+                else:
+                    if distance > 0:
+                        controller.move_left()
+                    else:
+                        controller.move_right()
+
+                    if abs_distance > HALF_BAR_WIDTH:
+                        hold_time = min(0.060, abs_distance * 0.0015 * active_gain)
+                    else:
+                        hold_time = min(0.022, abs_distance * 0.0005 * active_gain)
+
+                    time.sleep(hold_time)
+                    controller.stop_moving()
             else:
-                pydirectinput.press("d")
+                lost_frames += 1
+                if lost_frames >= 4:  # Bar is missing; mini-game has ended
+                    controller.stop_moving()
+                    if vision.check_reward_visible(frame):
+                        current_state = "REWARD"
+                    else:
+                        status_callback("Fish escaped. Resetting...", "#FF9500")
+                        current_state = "CAST"
+            continue
 
-            # BUG FIX: Calculate an inverse stabilization wait time.
-            # The closer the dash gets to the center, the LONGER the program waits
-            # between taps. This actively destroys kinetic momentum and eliminates jitter.
-            dampening_factor = (BRAKING_ZONE - abs_distance) * 0.0025
-            settle_delay = max(0.005, dampening_factor)
+        # --- STAGE 4: DISMISS REWARD WINDOW ---
+        if current_state == "REWARD":
+            status_callback("Reward Window Detected! Dismissing [ESC]...", "#BF5AF2")
+            reliable_press("escape", 0.1)
+            time.sleep(1.2)  # Wait for inventory saving screen cards to clear
 
-            time.sleep(settle_delay)
+            # Policy reinforcement calculation
+            if len(episode_errors) > 5:
+                mean_absolute_error = sum(episode_errors) / len(episode_errors)
+                best_score = LEARNING_METRICS["best_historical_score"]
 
-        time.sleep(0.002)
+                if mean_absolute_error < best_score:
+                    LEARNING_METRICS["best_historical_score"] = mean_absolute_error
+                    LEARNING_METRICS["optimal_gain"] = (
+                        0.85 * LEARNING_METRICS["optimal_gain"]
+                    ) + (0.15 * active_gain)
+                    LEARNING_METRICS["exploration_rate"] = max(
+                        0.02, LEARNING_METRICS["exploration_rate"] - 0.01
+                    )
+
+            # Generate new values for the next round
+            current_gain = LEARNING_METRICS["optimal_gain"]
+            exploration_modifier = 1.0 + random.uniform(
+                -LEARNING_METRICS["exploration_rate"],
+                LEARNING_METRICS["exploration_rate"],
+            )
+            active_gain = current_gain * exploration_modifier
+
+            current_state = "CAST"
+            continue
 
     controller.stop_moving()
     status_callback("Ready", "#8E8E93")
@@ -86,11 +194,18 @@ if __name__ == "__main__":
             return False
 
     if not is_admin():
-        ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", sys.executable, " ".join(sys.argv), None, 1
-        )
+        print("[System] Launching with User privileges. Elevating to Administrator...")
+        safe_args = " ".join([f'"{arg}"' for arg in sys.argv])
+        try:
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, safe_args, None, 1
+            )
+        except Exception as e:
+            print(f"[Error] Privilege elevation failed: {e}")
+            input("Press Enter to close...")
         sys.exit(0)
 
+    print("[System] Administrator privileges confirmed. Booting CatchSys GUI...")
     root = tk.Tk()
     app = AppleFishingGUI(root, worker_function=bot_loop)
 
