@@ -26,8 +26,7 @@ def reliable_press(key, duration=0.1):
 def bot_loop(status_callback):
     """
     Optimized State-Machine Autonomous Fishing Engine with First-Frame Auto-Detection.
-    Resolves initialization confusion and locks by dynamically managing fallbacks
-    between the waiting state and active mini-games.
+    Eliminates internal bar adjustments to lock position stability and prevent overshooting.
     """
     pydirectinput.PAUSE = 0.001
 
@@ -79,8 +78,6 @@ def bot_loop(status_callback):
 
         # --- STAGE 2: WAITING FOR BITE DIALOGUE ---
         if current_state == "WAITING_BITE":
-            # FALLBACK FIX: If the mini-game bar became active during screen blindness,
-            # transition to MINIGAME immediately instead of locking the thread.
             target_x, dash_x, target_width = vision.track_minigame(frame)
             if target_x is not None and dash_x is not None:
                 current_state = "MINIGAME"
@@ -106,6 +103,12 @@ def bot_loop(status_callback):
 
         # --- STAGE 3: HIGH-SPEED TRACKING MINI-GAME ---
         if current_state == "MINIGAME":
+            # BUG FIX: Checking reward window at top of frame cycle intercepts visual false-positives
+            if vision.check_reward_visible(frame):
+                controller.stop_moving()
+                current_state = "REWARD"
+                continue
+
             target_x, dash_x, target_width = vision.track_minigame(frame)
 
             if target_x is not None and dash_x is not None:
@@ -118,25 +121,20 @@ def bot_loop(status_callback):
                 abs_distance = abs(distance)
                 episode_errors.append(abs_distance)
 
-                HALF_BAR_WIDTH = target_width / 2
-                DEADZONE = max(2, int(target_width * 0.04))
+                # BUG FIX: Matches the exact physical boundaries of the color bar with a tiny 2% safety edge
+                SAFE_BAR_ZONE = int(target_width * 0.48)
 
-                if abs_distance <= DEADZONE:
+                if abs_distance <= SAFE_BAR_ZONE:
+                    # Already safely inside the colored bar; drop inputs immediately to ride it
                     controller.stop_moving()
-                    time.sleep(0.004)
                 else:
+                    # Outside the bar bounds; engage continuous direction tracking to catch up fast
                     if distance > 0:
                         controller.move_left()
                     else:
                         controller.move_right()
 
-                    if abs_distance > HALF_BAR_WIDTH:
-                        hold_time = min(0.060, abs_distance * 0.0015 * active_gain)
-                    else:
-                        hold_time = min(0.022, abs_distance * 0.0005 * active_gain)
-
-                    time.sleep(hold_time)
-                    controller.stop_moving()
+                time.sleep(0.001)  # Micro-sleep to preserve CPU clock cycles
             else:
                 lost_frames += 1
                 if lost_frames >= 4:  # Bar is missing; mini-game has ended
