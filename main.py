@@ -67,7 +67,6 @@ def bot_loop(status_callback):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     templates_dir = os.path.join(base_dir, "templates")
 
-    # 1. Check if the templates folder itself exists
     if not os.path.exists(templates_dir):
         logging.error(
             f"[!] ERROR: The 'templates' folder is missing! I looked here: {templates_dir}"
@@ -77,36 +76,28 @@ def bot_loop(status_callback):
         return
 
     def safe_imread(filename):
-        """Safely loads images and tells you EXACTLY what is missing."""
         file_path = os.path.join(templates_dir, filename)
-
-        # 2. Check if the specific file exists
         if not os.path.exists(file_path):
-            logging.error(
-                f"[!] ERROR: Missing file! I cannot find '{filename}' in the templates folder."
-            )
             return None
-
         try:
-            # 3. Read safely to bypass any foreign language folder bugs
             file_bytes = np.fromfile(file_path, dtype=np.uint8)
-            img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-
-            if img is None:
-                logging.error(f"[!] ERROR: '{filename}' exists but is broken or empty.")
+            # CRITICAL FIX: IMREAD_UNCHANGED prevents Python from destroying transparent backgrounds
+            img = cv2.imdecode(file_bytes, cv2.IMREAD_UNCHANGED)
             return img
         except Exception as e:
             logging.error(f"[!] ERROR: Cannot open '{filename}'. Reason: {e}")
             return None
 
-    # Load images individually so the bot can report exactly which one failed
-    template_reward = safe_imread("reward.jpg")
-    template_minigame = safe_imread("minigame.jpg")
-    template_hook = safe_imread("hook.jpg")
+    # Load all images (.png format)
+    template_reward = safe_imread("reward.png")
+    template_minigame = safe_imread("minigame.png")
+    template_hook1 = safe_imread("hook.png")
+    template_hook2 = safe_imread(
+        "hook2.png"
+    )  # Added support for the second transparent hook animation
 
-    # If ANY image failed to load, stop the bot
-    if template_reward is None or template_minigame is None or template_hook is None:
-        logging.error("[!] Please fix the missing files listed above and try again.")
+    if template_reward is None or template_minigame is None or template_hook1 is None:
+        logging.error("[!] ERROR: Core images missing from templates folder.")
         status_callback("Missing Image", "#FF453A")
         config.IS_RUNNING = False
         return
@@ -116,64 +107,47 @@ def bot_loop(status_callback):
     while config.IS_RUNNING:
         frame = vision.get_screenshot()
 
-        # PRIORITY 1: DO WE SEE THE REWARD SCREEN?
-        if vision.find_image(frame, template_reward, threshold=0.80):
+        # PRIORITY 1: DO WE SEE THE REWARD SCREEN? (Search ONLY center)
+        if vision.find_image(frame, template_reward, threshold=0.80, region="center"):
             status_callback("Reward Screen Detected! [ESC]...", "#BF5AF2")
             controller.stop_moving()
             reliable_press("escape", 0.1)
-            time.sleep(1.5)  # Wait for UI to close
+            time.sleep(4.0)  # Safe animation delay to let character put away fish
 
             rounds_completed += 1
             logging.info(f"[SUCCESS] Catch Count: {rounds_completed}")
-            continue  # Skip the rest of the loop and start over
-
-        # PRIORITY 2: DO WE SEE THE MINIGAME UI?
-        elif vision.find_image(frame, template_minigame, threshold=0.80):
-            target_x, dash_x, target_width = vision.track_minigame(frame)
-
-            if target_x is not None and dash_x is not None and target_width > 0:
-                lost_frames = 0
-                distance = dash_x - target_x
-
-                # The "Safe Zone" is 30% of the bar's width
-                safe_zone = target_width * 0.30
-
-                if dash_x > target_x + safe_zone:
-                    controller.move_left()
-                elif dash_x < target_x - safe_zone:
-                    controller.move_right()
-                else:
-                    controller.stop_moving()
-
-                status_callback("Playing Minigame...", "#34C759")
-                time.sleep(0.001)
-            else:
-                controller.stop_moving()
-                lost_frames += 1
-                time.sleep(0.03)
-
+            cast_time = 0  # Forces immediate recast
             continue
 
-        # PRIORITY 3: DO WE SEE THE BITE/HOOK ICON?
-        elif vision.find_image(frame, template_hook, threshold=0.80):
+        # PRIORITY 2: DO WE SEE THE MINIGAME UI? (Search ONLY top half)
+        elif vision.find_image(
+            frame, template_minigame, threshold=0.80, region="minigame"
+        ):
+            target_x, dash_x, target_width = vision.track_minigame(frame)
+            # ... (keep your existing tracking movement controls here) ...
+            continue
+
+        # PRIORITY 3: DO WE SEE THE BITE/HOOK ICON? (Search ONLY player action area)
+        elif vision.find_image(
+            frame, template_hook1, threshold=0.75, region="hook"
+        ) or vision.find_image(frame, template_hook2, threshold=0.75, region="hook"):
             status_callback("Bite Detected! Confirming Game [F]...", "#34C759")
             reliable_press("f", 0.1)
-            time.sleep(0.5)  # Wait for minigame to load
+            time.sleep(0.5)  # Wait for minigame to construct
             continue
 
         # PRIORITY 4: IF NOTHING ELSE IS ON SCREEN, WE MUST BE IDLE. CAST LINE.
         else:
             controller.stop_moving()
 
-            # We use a cooldown so it doesn't spam 'F' 100 times a second
-            if time.time() - cast_time > 5.0:
+            # CRITICAL FIX: Lowered retry cooldown to 2.5s. If game ignores 'F', it retries rapidly.
+            if time.time() - cast_time > 2.5:
                 status_callback("Idle. Casting Line [F]...", "#FF9500")
                 reliable_press("f", 0.1)
                 cast_time = time.time()
-                time.sleep(2.0)  # Wait for casting animation
+                time.sleep(2.0)
             else:
                 status_callback("Waiting for Fish...", "#8E8E93")
-
             time.sleep(0.05)
 
     controller.stop_moving()

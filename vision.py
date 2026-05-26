@@ -182,18 +182,43 @@ def reset_roi():
     pass
 
 
-def find_image(frame, template, threshold=0.8):
-    """Scans the screen to see if a specific template image is present."""
+def find_image(frame, template, threshold=0.8, region="all"):
+    """Scans a restricted region of the screen to eliminate cross-matching bugs."""
     if template is None:
         return False
 
-    # Convert both to grayscale to ignore minor day/night lighting changes
-    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    gray_template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+    h, w, _ = frame.shape
 
-    # Search for the image
-    result = cv2.matchTemplate(gray_frame, gray_template, cv2.TM_CCOEFF_NORMED)
+    # --- CRITICAL FIX: Isolate search zones to prevent wrong step detection ---
+    if region == "center":
+        # Reward screen strictly occupies the center 50% of the screen
+        search_frame = frame[
+            int(h * 0.25) : int(h * 0.75), int(w * 0.25) : int(w * 0.75)
+        ]
+    elif region == "hook":
+        # Hook prompt strictly appears around the center player action space
+        search_frame = frame[
+            int(h * 0.40) : int(h * 0.85), int(w * 0.35) : int(w * 0.65)
+        ]
+    elif region == "minigame":
+        # Minigame bar strictly populates the top 40%
+        search_frame = frame[0 : int(h * 0.40), 0:w]
+    else:
+        search_frame = frame
+
+    # Transparent background (Alpha channel) fallback handler
+    if len(template.shape) == 3 and template.shape[2] == 4:
+        mask = template[:, :, 3]
+        template_bgr = template[:, :, :3]
+        template_gray = cv2.cvtColor(template_bgr, cv2.COLOR_BGR2GRAY)
+        frame_gray = cv2.cvtColor(search_frame, cv2.COLOR_BGR2GRAY)
+        result = cv2.matchTemplate(
+            frame_gray, template_gray, cv2.TM_CCORR_NORMED, mask=mask
+        )
+    else:
+        template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+        frame_gray = cv2.cvtColor(search_frame, cv2.COLOR_BGR2GRAY)
+        result = cv2.matchTemplate(frame_gray, template_gray, cv2.TM_CCOEFF_NORMED)
+
     _, max_val, _, _ = cv2.minMaxLoc(result)
-
-    # If the match score is higher than our threshold (80%), we found it!
     return max_val >= threshold
