@@ -196,25 +196,26 @@ def bot_loop(status_callback):
                 rolling_accuracy = (frames_inside / total_frames_tracked) * 100
                 status_callback(f"Tracking | Acc: {rolling_accuracy:.1f}%", "#34C759")
 
-                # Move yellow bar (dash) left (A) if it's to the right of green bar (target)
-                if dash_x > target_x + (target_width * 0.1):
+                # Move yellow bar (dash) left (A) if it's to the right of green bar
+                if dash_x > target_x + (target_width * 0.4):
                     controller.move_left()
-                # Move yellow bar (dash) right (D) if it's to the left of green bar (target)
-                elif dash_x < target_x - (target_width * 0.1):
+                # Move yellow bar (dash) right (D) if it's to the left of green bar
+                elif dash_x < target_x - (target_width * 0.4):
                     controller.move_right()
-                # Stop if the yellow bar has reached the green bar
+                # Stop if the yellow bar is safely inside the green bar bounds
                 else:
                     controller.stop_moving()
 
                 time.sleep(0.001)
                 episode_errors.append(abs(distance))
-            else:
-                lost_frames += 1
-                time.sleep(0.03)
-                if lost_frames >= 5:  # UI target lost; game ended
-                    controller.stop_moving()
-                    current_state = "WAITING_FOR_REWARD"
-                    wait_time = time.time()
+            # --- NEW STEP: WAIT FOR REWARD SCREEN FADE-IN ---
+        if current_state == "WAITING_FOR_REWARD":
+            status_callback("Waiting for Reward UI...", "#BF5AF2")
+
+            # Increased from 4.0 to 15.0 to wait out the catch animation
+            if time.time() - wait_time > 15.0:
+                current_state = "STEP_1_CHECK"
+            continue
             continue
 
     controller.stop_moving()
