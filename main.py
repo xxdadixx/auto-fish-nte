@@ -9,10 +9,6 @@ import pydirectinput
 import random
 import os
 import logging
-import cv2
-
-# Ensure required directories exist cleanly
-os.makedirs("logs/minigame_images", exist_ok=True)
 
 
 # --- CUSTOM COLORED LOGGING FORMATTER ---
@@ -60,7 +56,7 @@ def reliable_press(key, duration=0.1):
 def bot_loop(status_callback):
     """
     State-Machine Autonomous Fishing Engine with First-Frame Auto-Detection.
-    Optimized to completely stop moving once safely inside the colored bar to prevent ping-pong looping.
+    Optimized with Wide-Belt Hysteresis and HSV tracking to keep the bar centered smoothly.
     """
     pydirectinput.PAUSE = 0.001
 
@@ -70,6 +66,10 @@ def bot_loop(status_callback):
     lost_frames = 0
     rounds_completed = 0
     cast_time = time.time()
+
+    # Dynamic accuracy tracking properties
+    frames_inside = 0
+    total_frames_tracked = 0
 
     # Policy weights assignment
     current_gain = LEARNING_METRICS["optimal_gain"]
@@ -104,6 +104,10 @@ def bot_loop(status_callback):
                 target_x, dash_x, target_width = vision.track_minigame(frame)
                 if target_x is not None and dash_x is not None:
                     current_state = "MINIGAME"
+                    lost_frames = 0
+                    episode_errors = []
+                    frames_inside = 0
+                    total_frames_tracked = 0
                 else:
                     current_state = "CAST"
             continue
@@ -128,6 +132,8 @@ def bot_loop(status_callback):
                 current_state = "MINIGAME"
                 lost_frames = 0
                 episode_errors = []
+                frames_inside = 0
+                total_frames_tracked = 0
                 continue
 
             if vision.check_hook_visible(frame):
@@ -136,6 +142,8 @@ def bot_loop(status_callback):
                 current_state = "MINIGAME"
                 lost_frames = 0
                 episode_errors = []
+                frames_inside = 0
+                total_frames_tracked = 0
                 time.sleep(0.8)  # Smooth transition into mini-game view layout
             else:
                 status_callback(
@@ -158,57 +166,49 @@ def bot_loop(status_callback):
 
             target_x, dash_x, target_width = vision.track_minigame(frame)
 
-            if target_x is not None and dash_x is not None:
+            if target_x is not None and dash_x is not None and target_width > 0:
                 lost_frames = 0
-                status_callback(
-                    f"Tracking Mini-Game (Gain: {active_gain:.2f})", "#34C759"
-                )
 
+                # 1. Calculate precise distance and proportional error ratio
                 distance = dash_x - target_x
-                abs_distance = abs(distance)
-                episode_errors.append(abs_distance)
+                half_width = target_width / 2.0
+                error_ratio = distance / half_width if half_width > 0 else 0
 
-                # Save sub-section cropped images for visual verification
-                if vision._roi_bbox is not None:
-                    bx = vision._roi_bbox
-                    crop_section = frame[bx[1] : bx[3], bx[0] : bx[2]]
-                else:
-                    crop_section = frame
+                # 2. Track precision metrics (abs <= 1.0 means inside the true green belt)
+                total_frames_tracked += 1
+                if abs(error_ratio) <= 1.0:
+                    frames_inside += 1
 
-                img_path = f"logs/minigame_images/frame_{int(time.time() * 1000)}.jpg"
-                cv2.imwrite(img_path, crop_section)
+                # Calculate true rolling percentage
+                rolling_accuracy = (frames_inside / total_frames_tracked) * 100
+                status_callback(f"Inside Bar | Acc: {rolling_accuracy:.1f}%", "#34C759")
 
-                # --- NO-PENDULUM COMFORT ZONE LOGIC ---
-                # OUTER_LIMIT: The absolute edge where we MUST press a button to avoid falling out (35% off center).
-                # INNER_LIMIT: The edge of our safe zone. Once we cross this, we let go of the button immediately (20% off center).
-                # This leaves a wide 40% gap in the middle where the bot does absolutely nothing, preventing jitter.
-                OUTER_LIMIT = int(target_width * 0.35)
-                INNER_LIMIT = int(target_width * 0.20)
+                # Throttled live log display every 15 frames to prevent screen lag
+                if total_frames_tracked % 15 == 0:
+                    logging.info(
+                        f"[MINIGAME LIVE] Accuracy: {rolling_accuracy:.2f}% ({frames_inside}/{total_frames_tracked} frames inside)"
+                    )
 
+                # 3. Wide Belt Stabilization Strategy
                 active_dir = controller._active_direction
 
-                if active_dir == "left":
-                    # We are holding left. Let go as soon as we safely cross the INNER_LIMIT to prevent overshoot momentum.
-                    if distance > INNER_LIMIT:
+                if active_dir is None:
+                    # When stationary, let it float freely inside the bar. Only engage near the outer limits.
+                    if error_ratio > 0.65:
                         controller.move_left()
-                    else:
+                    elif error_ratio < -0.65:
+                        controller.move_right()
+                elif active_dir == "left":
+                    # Stop holding Left early before it reaches center to allow soft braking
+                    if error_ratio <= 0.15:
                         controller.stop_moving()
                 elif active_dir == "right":
-                    # We are holding right. Let go as soon as we safely cross the INNER_LIMIT to prevent overshoot momentum.
-                    if distance < -INNER_LIMIT:
-                        controller.move_right()
-                    else:
-                        controller.stop_moving()
-                else:
-                    # We are stationary. ONLY press a button if the line drifts dangerously close to the OUTER_LIMIT.
-                    if distance > OUTER_LIMIT:
-                        controller.move_left()
-                    elif distance < -OUTER_LIMIT:
-                        controller.move_right()
-                    else:
+                    # Stop holding Right early before it reaches center to allow soft braking
+                    if error_ratio >= -0.15:
                         controller.stop_moving()
 
-                time.sleep(0.001)  # Preserve CPU clock cycles
+                time.sleep(0.001)  # CPU Relief
+                episode_errors.append(abs(distance))
             else:
                 lost_frames += 1
                 if lost_frames >= 4:  # Bar missing; game ended
@@ -228,6 +228,17 @@ def bot_loop(status_callback):
             status_callback("Reward Window Detected! Dismissing [ESC]...", "#BF5AF2")
             reliable_press("escape", 0.1)
             time.sleep(1.2)  # Wait for screen cards to clear
+
+            # Print final round accuracy summary statistics
+            if total_frames_tracked > 0:
+                tracking_accuracy = (frames_inside / total_frames_tracked) * 100
+                logging.info(
+                    f"\n    -> [ROUND SUMMARY] Final Performance Tracking Accuracy: {tracking_accuracy:.2f}% inside the bar!"
+                )
+            else:
+                logging.info(
+                    "\n    -> [ROUND SUMMARY] No tracking samples captured this round."
+                )
 
             # Policy reinforcement calculation
             if len(episode_errors) > 5:
@@ -294,9 +305,14 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = AppleFishingGUI(root, worker_function=bot_loop)
 
+    # DUAL-LAYER HOTKEY BINDING:
+    # 1. Global System Hook (Works when focused inside Borderless/Windowed game)
     try:
         keyboard.add_hotkey(config.HOTKEY_TOGGLE, app.external_toggle)
     except Exception as e:
         print(f"Warning: Global hotkey initialization failed ({e}).")
+
+    # 2. Local Window Focus Hook (Guaranteed to work whenever you press F5 directly on the bot GUI panel)
+    root.bind(f"<{config.HOTKEY_TOGGLE.upper()}>", lambda event: app.external_toggle())
 
     root.mainloop()

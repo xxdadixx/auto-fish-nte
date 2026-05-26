@@ -9,8 +9,6 @@ try:
 except:
     pass
 
-_roi_bbox = None
-
 
 def get_screenshot():
     """Captures the screen and transforms it into a standard BGR numpy array."""
@@ -34,7 +32,6 @@ def check_hook_visible(frame):
         mask_hook, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
 
-    # FIX: Lowered contour area threshold to support different screen resolutions and UI scales
     return any(cv2.contourArea(c) > 30 for c in contours_hook)
 
 
@@ -55,32 +52,26 @@ def check_reward_visible(frame):
 
 
 def track_minigame(frame):
-    """Focused mini-game bar tracking. Highly optimized with local sub-regions."""
-    global _roi_bbox
+    """Focused mini-game bar tracking. Converts to HSV to capture full bar width."""
+    h, w, _ = frame.shape
 
-    if _roi_bbox is not None:
-        crop_frame = frame[_roi_bbox[1] : _roi_bbox[3], _roi_bbox[0] : _roi_bbox[2]]
-        offset_x, offset_y = _roi_bbox[0], _roi_bbox[1]
-    else:
-        crop_frame = frame
-        offset_x, offset_y = 0, 0
+    # Isolate upper 35% height to ignore rod line and text box noise
+    search_h = int(h * 0.35)
+    crop_frame = frame[0:search_h, 0:w]
 
-    tol = config.COLOR_TOLERANCE
+    # Convert to HSV color space for lighting-immune width detection
+    hsv = cv2.cvtColor(crop_frame, cv2.COLOR_BGR2HSV)
 
-    r_t, g_t, b_t = config.TARGET_BAR_COLOR
-    lower_target = np.array([max(0, b_t - tol), max(0, g_t - tol), max(0, r_t - tol)])
-    upper_target = np.array(
-        [min(255, b_t + tol), min(255, g_t + tol), min(255, r_t + tol)]
-    )
+    # Universal boundaries for neon teal/green target bar segment
+    lower_target = np.array([75, 40, 40])
+    upper_target = np.array([100, 255, 255])
 
-    r_d, g_d, b_d = config.DASH_COLOR
-    lower_dash = np.array([max(0, b_d - tol), max(0, g_d - tol), max(0, r_d - tol)])
-    upper_dash = np.array(
-        [min(255, b_d + tol), min(255, g_d + tol), min(255, r_d + tol)]
-    )
+    # Universal boundaries for bright neon yellow slider line
+    lower_dash = np.array([24, 40, 40])
+    upper_dash = np.array([38, 255, 255])
 
-    mask_target = cv2.inRange(crop_frame, lower_target, upper_target)
-    mask_dash = cv2.inRange(crop_frame, lower_dash, upper_dash)
+    mask_target = cv2.inRange(hsv, lower_target, upper_target)
+    mask_dash = cv2.inRange(hsv, lower_dash, upper_dash)
 
     contours_target, _ = cv2.findContours(
         mask_target, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
@@ -93,34 +84,31 @@ def track_minigame(frame):
     dash_candidates = []
 
     for c in contours_target:
-        if cv2.contourArea(c) > 60:
+        if cv2.contourArea(c) > 50:
             M = cv2.moments(c)
             if M["m00"] != 0:
-                cx = int(M["m10"] / M["m00"]) + offset_x
-                cy = int(M["m01"] / M["m00"]) + offset_y
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
                 target_candidates.append((cx, cy, c))
 
     for c in contours_dash:
-        if cv2.contourArea(c) > 5:
+        if cv2.contourArea(c) > 4:
             M = cv2.moments(c)
             if M["m00"] != 0:
-                cx = int(M["m10"] / M["m00"]) + offset_x
-                cy = int(M["m01"] / M["m00"]) + offset_y
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
                 dash_candidates.append((cx, cy))
 
+    # Pair items sharing identical alignment rows
     for tx, ty, t_contour in target_candidates:
         for dx, dy in dash_candidates:
-            if abs(ty - dy) <= 20 and abs(tx - dx) <= 400:
-                x, y, w, h = cv2.boundingRect(t_contour)
-                if _roi_bbox is None:
-                    _roi_bbox = (max(0, x - 150), max(0, ty - 60), x + w + 150, ty + 60)
-                return tx, dx, w
+            if abs(ty - dy) <= 25:
+                _, _, w_box, _ = cv2.boundingRect(t_contour)
+                return tx, dx, w_box
 
-    _roi_bbox = None
     return None, None, 0
 
 
 def reset_roi():
-    """Forces an active reset of localized bounding box coordinates."""
-    global _roi_bbox
-    _roi_bbox = None
+    """Maintained context stub for initialization compatibility."""
+    pass
