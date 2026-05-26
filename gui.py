@@ -101,7 +101,6 @@ class AppleFishingGUI:
                 text=f"Stop Automation ({config.HOTKEY_TOGGLE.upper()})", bg="#FF453A"
             )
 
-            # Instantly execute without the countdown loop
             def run_worker():
                 if config.IS_RUNNING:
                     self.worker_function(self.update_status)
