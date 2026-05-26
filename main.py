@@ -11,14 +11,13 @@ import os
 import logging
 
 
-# --- CUSTOM COLORED LOGGING FORMATTER ---
 class ColoredFormatter(logging.Formatter):
     COLORS = {
-        "DEBUG": "\033[94m",  # Blue
-        "INFO": "\033[96m",  # Cyan
-        "WARNING": "\033[93m",  # Yellow
-        "ERROR": "\033[91m",  # Red
-        "CRITICAL": "\033[95m",  # Magenta
+        "DEBUG": "\033[94m",
+        "INFO": "\033[96m",
+        "WARNING": "\033[93m",
+        "ERROR": "\033[91m",
+        "CRITICAL": "\033[95m",
     }
     RESET = "\033[0m"
 
@@ -29,7 +28,6 @@ class ColoredFormatter(logging.Formatter):
         return formatter.format(record)
 
 
-# Configure structured file logging
 file_handler = logging.FileHandler("logs/execution.log", encoding="utf-8")
 file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 
@@ -46,16 +44,12 @@ LEARNING_METRICS = {
 
 
 def reliable_press(key, duration=0.1):
-    """Sends a hardware keypress with an explicit hold duration to guarantee registration."""
     pydirectinput.keyDown(key)
     time.sleep(duration)
     pydirectinput.keyUp(key)
 
 
 def bot_loop(status_callback):
-    """
-    Autonomous Fishing Engine strictly synchronized to the 4 auto-finding steps.
-    """
     pydirectinput.PAUSE = 0.001
 
     current_state = "INITIAL_SYNC"
@@ -64,6 +58,7 @@ def bot_loop(status_callback):
     lost_frames = 0
     rounds_completed = 0
     cast_time = time.time()
+    wait_time = time.time()
 
     frames_inside = 0
     total_frames_tracked = 0
@@ -86,6 +81,9 @@ def bot_loop(status_callback):
             return
         status_callback(f"Click Game Window! ({i}s)", "#FF9500")
         time.sleep(1.0)
+
+    # Lock onto the window the user just clicked
+    vision.lock_active_window()
 
     while config.IS_RUNNING:
         if current_state != last_logged_state:
@@ -128,10 +126,18 @@ def bot_loop(status_callback):
                 current_state = "STEP_1_CHECK"
             continue
 
+        # --- NEW STEP: WAIT FOR REWARD SCREEN FADE-IN ---
+        if current_state == "WAITING_FOR_REWARD":
+            status_callback("Waiting for Reward UI...", "#BF5AF2")
+
+            # If 4 seconds pass without the reward popping up (e.g. fish escaped)
+            if time.time() - wait_time > 4.0:
+                current_state = "STEP_1_CHECK"
+            continue
+
         # --- STEP 1: CHECK FISHING STATUS & CAST ---
         if current_state == "STEP_1_CHECK":
             controller.stop_moving()
-            # If icon has no light (Image 1), no fishing status is active -> Start fishing
             if not vision.check_hook_visible(frame):
                 status_callback("No Status Detected. Casting Line [F]...", "#FF9500")
                 reliable_press("f", 0.1)
@@ -139,8 +145,8 @@ def bot_loop(status_callback):
                 current_state = "STEP_2_WAITING"
                 time.sleep(2.0)  # Animation lock buffer
             else:
-                # If it happens to be glowing already, push directly to Step 2
                 current_state = "STEP_2_WAITING"
+                time.sleep(0.5)  # Debounce buffer to stop instant false-positive skips
             continue
 
         # --- STEP 2: CHECK GLOWING ICON & CONFIRM MINI-GAME ---
@@ -154,7 +160,6 @@ def bot_loop(status_callback):
                 total_frames_tracked = 0
                 continue
 
-            # Check if icon is glowing blue/lighted up (Image 2 profile)
             if vision.check_hook_visible(frame):
                 status_callback("Bite Detected! Confirming Game [F]...", "#34C759")
                 reliable_press("f", 0.1)
@@ -180,7 +185,6 @@ def bot_loop(status_callback):
 
             if target_x is not None and dash_x is not None and target_width > 0:
                 lost_frames = 0
-
                 distance = dash_x - target_x
                 half_width = target_width / 2.0
                 error_ratio = distance / half_width if half_width > 0 else 0
@@ -192,20 +196,15 @@ def bot_loop(status_callback):
                 rolling_accuracy = (frames_inside / total_frames_tracked) * 100
                 status_callback(f"Tracking | Acc: {rolling_accuracy:.1f}%", "#34C759")
 
-                # Wide Belt Stabilization Control (Pressing A / D)
-                active_dir = controller._active_direction
-
-                if active_dir is None:
-                    if error_ratio > 0.65:
-                        controller.move_left()  # Press A
-                    elif error_ratio < -0.65:
-                        controller.move_right()  # Press D
-                elif active_dir == "left":
-                    if error_ratio <= 0.15:
-                        controller.stop_moving()
-                elif active_dir == "right":
-                    if error_ratio >= -0.15:
-                        controller.stop_moving()
+                # Move yellow bar (dash) left (A) if it's to the right of green bar (target)
+                if dash_x > target_x + (target_width * 0.1):
+                    controller.move_left()
+                # Move yellow bar (dash) right (D) if it's to the left of green bar (target)
+                elif dash_x < target_x - (target_width * 0.1):
+                    controller.move_right()
+                # Stop if the yellow bar has reached the green bar
+                else:
+                    controller.stop_moving()
 
                 time.sleep(0.001)
                 episode_errors.append(abs(distance))
@@ -214,8 +213,8 @@ def bot_loop(status_callback):
                 time.sleep(0.03)
                 if lost_frames >= 5:  # UI target lost; game ended
                     controller.stop_moving()
-                    time.sleep(0.5)  # Allow reward window frame to render fully
-                    current_state = "STEP_1_CHECK"
+                    current_state = "WAITING_FOR_REWARD"
+                    wait_time = time.time()
             continue
 
     controller.stop_moving()
@@ -255,5 +254,4 @@ if __name__ == "__main__":
         print(f"Warning: Global hotkey initialization failed ({e}).")
 
     root.bind(f"<{config.HOTKEY_TOGGLE.upper()}>", lambda event: app.external_toggle())
-
     root.mainloop()
