@@ -101,20 +101,12 @@ class AppleFishingGUI:
                 text=f"Stop Automation ({config.HOTKEY_TOGGLE.upper()})", bg="#FF453A"
             )
 
-            # Threaded countdown wrapper to let the user select the game window
-            def countdown_and_start():
-                for i in range(3, 0, -1):
-                    if not config.IS_RUNNING:
-                        return
-                    self.update_status(f"Click Game Window! ({i}s)", "#FF9500")
-                    time.sleep(1.0)
-
+            # Instantly execute without the countdown loop
+            def run_worker():
                 if config.IS_RUNNING:
                     self.worker_function(self.update_status)
 
-            self.worker_thread = threading.Thread(
-                target=countdown_and_start, daemon=True
-            )
+            self.worker_thread = threading.Thread(target=run_worker, daemon=True)
             self.worker_thread.start()
         else:
             config.IS_RUNNING = False

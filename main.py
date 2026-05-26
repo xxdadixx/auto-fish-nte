@@ -74,14 +74,6 @@ def bot_loop(status_callback):
         "\n=========================================\n[START] Automation engine successfully initialized.\n========================================="
     )
 
-    # 3-Second Focus Cooldown buffer
-    for i in range(3, 0, -1):
-        if not config.IS_RUNNING:
-            status_callback("Ready", "#8E8E93")
-            return
-        status_callback(f"Click Game Window! ({i}s)", "#FF9500")
-        time.sleep(1.0)
-
     # Lock onto the window the user just clicked
     vision.lock_active_window()
 
@@ -94,47 +86,6 @@ def bot_loop(status_callback):
 
         frame = vision.get_screenshot()
 
-        # --- STEP 4: DISMISS REWARD WINDOW ---
-        if vision.check_reward_visible(frame):
-            current_state = "REWARD"
-            status_callback("Reward Screen Detected! [ESC]...", "#BF5AF2")
-            controller.stop_moving()
-            reliable_press("escape", 0.1)
-            time.sleep(1.5)  # Wait for reward animation to completely clear
-
-            if total_frames_tracked > 0:
-                tracking_accuracy = (frames_inside / total_frames_tracked) * 100
-                logging.info(
-                    f"\n    -> [ROUND SUMMARY] Final Accuracy: {tracking_accuracy:.2f}%"
-                )
-
-            rounds_completed += 1
-            logging.info(
-                f"\n=========================================\n[SUCCESS] Catch Count: {rounds_completed}\n========================================="
-            )
-            current_state = "STEP_1_CHECK"
-            continue
-
-        # --- INITIAL SYNC STATE ON STARTUP ---
-        if current_state == "INITIAL_SYNC":
-            target_x, dash_x, target_width = vision.track_minigame(frame)
-            if target_x is not None and dash_x is not None:
-                current_state = "STEP_3_MINIGAME"
-            elif vision.check_hook_visible(frame):
-                current_state = "STEP_2_WAITING"
-            else:
-                current_state = "STEP_1_CHECK"
-            continue
-
-        # --- NEW STEP: WAIT FOR REWARD SCREEN FADE-IN ---
-        if current_state == "WAITING_FOR_REWARD":
-            status_callback("Waiting for Reward UI...", "#BF5AF2")
-
-            # If 4 seconds pass without the reward popping up (e.g. fish escaped)
-            if time.time() - wait_time > 4.0:
-                current_state = "STEP_1_CHECK"
-            continue
-
         # --- STEP 1: CHECK FISHING STATUS & CAST ---
         if current_state == "STEP_1_CHECK":
             controller.stop_moving()
@@ -146,7 +97,7 @@ def bot_loop(status_callback):
                 time.sleep(2.0)  # Animation lock buffer
             else:
                 current_state = "STEP_2_WAITING"
-                time.sleep(0.5)  # Debounce buffer to stop instant false-positive skips
+                time.sleep(0.5)
             continue
 
         # --- STEP 2: CHECK GLOWING ICON & CONFIRM MINI-GAME ---
@@ -163,12 +114,9 @@ def bot_loop(status_callback):
             if vision.check_hook_visible(frame):
                 status_callback("Bite Detected! Confirming Game [F]...", "#34C759")
                 reliable_press("f", 0.1)
-                current_state = "STEP_3_MINIGAME"
-                lost_frames = 0
-                episode_errors = []
-                frames_inside = 0
-                total_frames_tracked = 0
-                time.sleep(0.8)  # View transition buffer
+                current_state = "WAIT_MINIGAME_LOAD"  # Added missing transition state
+                wait_time = time.time()
+                time.sleep(0.5)
             else:
                 status_callback(
                     f"Waiting for Bite... ({time.time() - cast_time:.1f}s)", "#FF9500"
@@ -177,6 +125,20 @@ def bot_loop(status_callback):
                     logging.warning("\n[!] Timeout reached. Resetting back to Step 1.")
                     current_state = "STEP_1_CHECK"
             time.sleep(0.04)
+            continue
+
+        # --- NEW: SAFEGUARD TO WAIT FOR UI TO RENDER ---
+        if current_state == "WAIT_MINIGAME_LOAD":
+            status_callback("Waiting for Minigame UI...", "#34C759")
+            target_x, dash_x, target_width = vision.track_minigame(frame)
+            if target_x is not None and dash_x is not None:
+                current_state = "STEP_3_MINIGAME"
+                lost_frames = 0
+                episode_errors = []
+                frames_inside = 0
+                total_frames_tracked = 0
+            elif time.time() - wait_time > 3.0:  # Timeout safety net
+                current_state = "STEP_1_CHECK"
             continue
 
         # --- STEP 3: HIGH-SPEED TRACKING MINI-GAME ---

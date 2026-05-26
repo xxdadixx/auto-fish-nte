@@ -126,22 +126,20 @@ def track_minigame(frame):
     dash_candidates = []
 
     for c in contours_target:
-        area = cv2.contourArea(c)
+        x, y, bw, bh = cv2.boundingRect(c)
+        area = bw * bh
         if area > 50:
-            M = cv2.moments(c)
-            if M["m00"] != 0:
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-                target_candidates.append((cx, cy, c, area))
+            cx = x + (bw // 2)
+            cy = y + (bh // 2)
+            target_candidates.append((cx, cy, c, area))
 
     for c in contours_dash:
-        area = cv2.contourArea(c)
+        x, y, bw, bh = cv2.boundingRect(c)
+        area = bw * bh
         if area > 4:
-            M = cv2.moments(c)
-            if M["m00"] != 0:
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-                dash_candidates.append((cx, cy, area))
+            cx = x + (bw // 2)
+            cy = y + (bh // 2)
+            dash_candidates.append((cx, cy, area))
 
     target_candidates.sort(key=lambda x: x[3], reverse=True)
     dash_candidates.sort(key=lambda x: x[2], reverse=True)
