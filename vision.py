@@ -105,22 +105,15 @@ def track_minigame(frame):
     h, w, _ = frame.shape
     search_h = int(h * 0.35)
     crop_frame = frame[0:search_h, 0:w]
-    
-    tol = config.COLOR_TOLERANCE
+    hsv = cv2.cvtColor(crop_frame, cv2.COLOR_BGR2HSV)
 
-    # Extract Target Bar (Green) config colors
-    r_t, g_t, b_t = config.TARGET_BAR_COLOR
-    lower_target = np.array([max(0, b_t - tol), max(0, g_t - tol), max(0, r_t - tol)])
-    upper_target = np.array([min(255, b_t + tol), min(255, g_t + tol), min(255, r_t + tol)])
+    lower_target = np.array([75, 40, 40])
+    upper_target = np.array([100, 255, 255])
+    lower_dash = np.array([24, 40, 40])
+    upper_dash = np.array([38, 255, 255])
 
-    # Extract Dash Bar (Yellow) config colors
-    r_d, g_d, b_d = config.DASH_COLOR
-    lower_dash = np.array([max(0, b_d - tol), max(0, g_d - tol), max(0, r_d - tol)])
-    upper_dash = np.array([min(255, b_d + tol), min(255, g_d + tol), min(255, r_d + tol)])
-
-    # Apply strict BGR masks
-    mask_target = cv2.inRange(crop_frame, lower_target, upper_target)
-    mask_dash = cv2.inRange(crop_frame, lower_dash, upper_dash)
+    mask_target = cv2.inRange(hsv, lower_target, upper_target)
+    mask_dash = cv2.inRange(hsv, lower_dash, upper_dash)
 
     contours_target, _ = cv2.findContours(
         mask_target, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
