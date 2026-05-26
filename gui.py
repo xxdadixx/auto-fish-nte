@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk
 import threading
+import time
 import config
 
 
@@ -69,7 +70,6 @@ class AppleFishingGUI:
         )
         self.status_val.pack(anchor="w", padx=15, pady=(0, 12))
 
-        # Added dynamic hotkey hint text directly into the button layout
         self.btn = tk.Button(
             self.root,
             text=f"Start Automation ({config.HOTKEY_TOGGLE.upper()})",
@@ -101,8 +101,19 @@ class AppleFishingGUI:
                 text=f"Stop Automation ({config.HOTKEY_TOGGLE.upper()})", bg="#FF453A"
             )
 
+            # Threaded countdown wrapper to let the user select the game window
+            def countdown_and_start():
+                for i in range(3, 0, -1):
+                    if not config.IS_RUNNING:
+                        return
+                    self.update_status(f"Click Game Window! ({i}s)", "#FF9500")
+                    time.sleep(1.0)
+
+                if config.IS_RUNNING:
+                    self.worker_function(self.update_status)
+
             self.worker_thread = threading.Thread(
-                target=self.worker_function, args=(self.update_status,), daemon=True
+                target=countdown_and_start, daemon=True
             )
             self.worker_thread.start()
         else:

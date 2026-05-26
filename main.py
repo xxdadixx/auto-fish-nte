@@ -29,7 +29,7 @@ class ColoredFormatter(logging.Formatter):
         return formatter.format(record)
 
 
-# Configure structured file logging (plain text for file, colors for console)
+# Configure structured file logging
 file_handler = logging.FileHandler("logs/execution.log", encoding="utf-8")
 file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 
@@ -38,7 +38,6 @@ stream_handler.setFormatter(ColoredFormatter())
 
 logging.basicConfig(level=logging.INFO, handlers=[file_handler, stream_handler])
 
-# Persistent In-Memory Learning Parameters across runs
 LEARNING_METRICS = {
     "optimal_gain": 1.0,
     "best_historical_score": 9999.0,
@@ -55,23 +54,20 @@ def reliable_press(key, duration=0.1):
 
 def bot_loop(status_callback):
     """
-    State-Machine Autonomous Fishing Engine with First-Frame Auto-Detection.
-    Optimized with Wide-Belt Hysteresis and HSV tracking to keep the bar centered smoothly.
+    Autonomous Fishing Engine strictly synchronized to the 4 auto-finding steps.
     """
     pydirectinput.PAUSE = 0.001
 
-    current_state = None
+    current_state = "INITIAL_SYNC"
     last_logged_state = None
     episode_errors = []
     lost_frames = 0
     rounds_completed = 0
     cast_time = time.time()
 
-    # Dynamic accuracy tracking properties
     frames_inside = 0
     total_frames_tracked = 0
 
-    # Policy weights assignment
     current_gain = LEARNING_METRICS["optimal_gain"]
     exploration_modifier = 1.0 + random.uniform(
         -LEARNING_METRICS["exploration_rate"], LEARNING_METRICS["exploration_rate"]
@@ -83,195 +79,143 @@ def bot_loop(status_callback):
         "\n=========================================\n[START] Automation engine successfully initialized.\n========================================="
     )
 
+    # 3-Second Focus Cooldown buffer
+    for i in range(3, 0, -1):
+        if not config.IS_RUNNING:
+            status_callback("Ready", "#8E8E93")
+            return
+        status_callback(f"Click Game Window! ({i}s)", "#FF9500")
+        time.sleep(1.0)
+
     while config.IS_RUNNING:
-        # Prevent log flooding by capturing explicit state changes only, with visual spacing
         if current_state != last_logged_state:
             logging.info(
-                f"\n---> STATE TRANSITION: [ {last_logged_state} ] to [ {current_state} ] <---"
+                f"\n---> STEP TRANSITION: [ {last_logged_state} ] to [ {current_state} ] <---"
             )
             last_logged_state = current_state
 
-        # Dynamic first-frame initialization check
-        if current_state is None:
-            status_callback("Syncing Game State...", "#FF9500")
-            frame = vision.get_screenshot()
-            if vision.check_reward_visible(frame):
-                current_state = "REWARD"
-            elif vision.check_hook_visible(frame):
-                current_state = "WAITING_BITE"
-                cast_time = time.time()
-            else:
-                target_x, dash_x, target_width = vision.track_minigame(frame)
-                if target_x is not None and dash_x is not None:
-                    current_state = "MINIGAME"
-                    lost_frames = 0
-                    episode_errors = []
-                    frames_inside = 0
-                    total_frames_tracked = 0
-                else:
-                    current_state = "CAST"
-            continue
-
-        # --- STAGE 1: CAST THE LINE ---
-        if current_state == "CAST":
-            controller.stop_moving()
-            status_callback("Casting Line Hook [F]...", "#FF9500")
-            reliable_press("f", 0.1)
-            cast_time = time.time()
-            current_state = "WAITING_BITE"
-            time.sleep(2.0)  # Allow initial animation to settle
-            continue
-
-        # Fetch active screen frame to distribute to the current state check
         frame = vision.get_screenshot()
 
-        # --- STAGE 2: WAITING FOR BITE DIALOGUE ---
-        if current_state == "WAITING_BITE":
+        # --- STEP 4: DISMISS REWARD WINDOW ---
+        if vision.check_reward_visible(frame):
+            current_state = "REWARD"
+            status_callback("Reward Screen Detected! [ESC]...", "#BF5AF2")
+            controller.stop_moving()
+            reliable_press("escape", 0.1)
+            time.sleep(1.5)  # Wait for reward animation to completely clear
+
+            if total_frames_tracked > 0:
+                tracking_accuracy = (frames_inside / total_frames_tracked) * 100
+                logging.info(
+                    f"\n    -> [ROUND SUMMARY] Final Accuracy: {tracking_accuracy:.2f}%"
+                )
+
+            rounds_completed += 1
+            logging.info(
+                f"\n=========================================\n[SUCCESS] Catch Count: {rounds_completed}\n========================================="
+            )
+            current_state = "STEP_1_CHECK"
+            continue
+
+        # --- INITIAL SYNC STATE ON STARTUP ---
+        if current_state == "INITIAL_SYNC":
             target_x, dash_x, target_width = vision.track_minigame(frame)
             if target_x is not None and dash_x is not None:
-                current_state = "MINIGAME"
+                current_state = "STEP_3_MINIGAME"
+            elif vision.check_hook_visible(frame):
+                current_state = "STEP_2_WAITING"
+            else:
+                current_state = "STEP_1_CHECK"
+            continue
+
+        # --- STEP 1: CHECK FISHING STATUS & CAST ---
+        if current_state == "STEP_1_CHECK":
+            controller.stop_moving()
+            # If icon has no light (Image 1), no fishing status is active -> Start fishing
+            if not vision.check_hook_visible(frame):
+                status_callback("No Status Detected. Casting Line [F]...", "#FF9500")
+                reliable_press("f", 0.1)
+                cast_time = time.time()
+                current_state = "STEP_2_WAITING"
+                time.sleep(2.0)  # Animation lock buffer
+            else:
+                # If it happens to be glowing already, push directly to Step 2
+                current_state = "STEP_2_WAITING"
+            continue
+
+        # --- STEP 2: CHECK GLOWING ICON & CONFIRM MINI-GAME ---
+        if current_state == "STEP_2_WAITING":
+            target_x, dash_x, target_width = vision.track_minigame(frame)
+            if target_x is not None and dash_x is not None:
+                current_state = "STEP_3_MINIGAME"
                 lost_frames = 0
                 episode_errors = []
                 frames_inside = 0
                 total_frames_tracked = 0
                 continue
 
+            # Check if icon is glowing blue/lighted up (Image 2 profile)
             if vision.check_hook_visible(frame):
-                status_callback("Bite Detected! Hooking Fish [F]...", "#34C759")
+                status_callback("Bite Detected! Confirming Game [F]...", "#34C759")
                 reliable_press("f", 0.1)
-                current_state = "MINIGAME"
+                current_state = "STEP_3_MINIGAME"
                 lost_frames = 0
                 episode_errors = []
                 frames_inside = 0
                 total_frames_tracked = 0
-                time.sleep(0.8)  # Smooth transition into mini-game view layout
+                time.sleep(0.8)  # View transition buffer
             else:
                 status_callback(
                     f"Waiting for Bite... ({time.time() - cast_time:.1f}s)", "#FF9500"
                 )
-                if time.time() - cast_time > 25.0:  # Safety timeout loop reset
-                    logging.warning(
-                        "\n[!] Bite timeout reached without response. Recasting line."
-                    )
-                    current_state = "CAST"
+                if time.time() - cast_time > 25.0:  # Safety Timeout
+                    logging.warning("\n[!] Timeout reached. Resetting back to Step 1.")
+                    current_state = "STEP_1_CHECK"
             time.sleep(0.04)
             continue
 
-        # --- STAGE 3: HIGH-SPEED TRACKING MINI-GAME ---
-        if current_state == "MINIGAME":
-            if vision.check_reward_visible(frame):
-                controller.stop_moving()
-                current_state = "REWARD"
-                continue
-
+        # --- STEP 3: HIGH-SPEED TRACKING MINI-GAME ---
+        if current_state == "STEP_3_MINIGAME":
             target_x, dash_x, target_width = vision.track_minigame(frame)
 
             if target_x is not None and dash_x is not None and target_width > 0:
                 lost_frames = 0
 
-                # 1. Calculate precise distance and proportional error ratio
                 distance = dash_x - target_x
                 half_width = target_width / 2.0
                 error_ratio = distance / half_width if half_width > 0 else 0
 
-                # 2. Track precision metrics (abs <= 1.0 means inside the true green belt)
                 total_frames_tracked += 1
                 if abs(error_ratio) <= 1.0:
                     frames_inside += 1
 
-                # Calculate true rolling percentage
                 rolling_accuracy = (frames_inside / total_frames_tracked) * 100
-                status_callback(f"Inside Bar | Acc: {rolling_accuracy:.1f}%", "#34C759")
+                status_callback(f"Tracking | Acc: {rolling_accuracy:.1f}%", "#34C759")
 
-                # Throttled live log display every 15 frames to prevent screen lag
-                if total_frames_tracked % 15 == 0:
-                    logging.info(
-                        f"[MINIGAME LIVE] Accuracy: {rolling_accuracy:.2f}% ({frames_inside}/{total_frames_tracked} frames inside)"
-                    )
-
-                # 3. Wide Belt Stabilization Strategy
+                # Wide Belt Stabilization Control (Pressing A / D)
                 active_dir = controller._active_direction
 
                 if active_dir is None:
-                    # When stationary, let it float freely inside the bar. Only engage near the outer limits.
                     if error_ratio > 0.65:
-                        controller.move_left()
+                        controller.move_left()  # Press A
                     elif error_ratio < -0.65:
-                        controller.move_right()
+                        controller.move_right()  # Press D
                 elif active_dir == "left":
-                    # Stop holding Left early before it reaches center to allow soft braking
                     if error_ratio <= 0.15:
                         controller.stop_moving()
                 elif active_dir == "right":
-                    # Stop holding Right early before it reaches center to allow soft braking
                     if error_ratio >= -0.15:
                         controller.stop_moving()
 
-                time.sleep(0.001)  # CPU Relief
+                time.sleep(0.001)
                 episode_errors.append(abs(distance))
             else:
                 lost_frames += 1
-                if lost_frames >= 4:  # Bar missing; game ended
+                time.sleep(0.03)
+                if lost_frames >= 5:  # UI target lost; game ended
                     controller.stop_moving()
-                    if vision.check_reward_visible(frame):
-                        current_state = "REWARD"
-                    else:
-                        status_callback("Fish escaped. Resetting...", "#FF9500")
-                        logging.warning(
-                            "\n[!] Mini-game terminated: Target tracking lost (Fish Escaped)."
-                        )
-                        current_state = "CAST"
-            continue
-
-        # --- STAGE 4: DISMISS REWARD WINDOW ---
-        if current_state == "REWARD":
-            status_callback("Reward Window Detected! Dismissing [ESC]...", "#BF5AF2")
-            reliable_press("escape", 0.1)
-            time.sleep(1.2)  # Wait for screen cards to clear
-
-            # Print final round accuracy summary statistics
-            if total_frames_tracked > 0:
-                tracking_accuracy = (frames_inside / total_frames_tracked) * 100
-                logging.info(
-                    f"\n    -> [ROUND SUMMARY] Final Performance Tracking Accuracy: {tracking_accuracy:.2f}% inside the bar!"
-                )
-            else:
-                logging.info(
-                    "\n    -> [ROUND SUMMARY] No tracking samples captured this round."
-                )
-
-            # Policy reinforcement calculation
-            if len(episode_errors) > 5:
-                mean_absolute_error = sum(episode_errors) / len(episode_errors)
-                best_score = LEARNING_METRICS["best_historical_score"]
-
-                if mean_absolute_error < best_score:
-                    LEARNING_METRICS["best_historical_score"] = mean_absolute_error
-                    LEARNING_METRICS["optimal_gain"] = (
-                        0.85 * LEARNING_METRICS["optimal_gain"]
-                    ) + (0.15 * active_gain)
-                    LEARNING_METRICS["exploration_rate"] = max(
-                        0.02, LEARNING_METRICS["exploration_rate"] - 0.01
-                    )
-                    logging.info(
-                        f"    -> [AI UPDATE] New policy achieved. Gain: {LEARNING_METRICS['optimal_gain']:.4f}, Exploration: {LEARNING_METRICS['exploration_rate']:.2f}"
-                    )
-
-            # Generate parameters for next round
-            current_gain = LEARNING_METRICS["optimal_gain"]
-            exploration_modifier = 1.0 + random.uniform(
-                -LEARNING_METRICS["exploration_rate"],
-                LEARNING_METRICS["exploration_rate"],
-            )
-            active_gain = current_gain * exploration_modifier
-
-            # Increment rounds completed and log clearly separated at the end of the full cycle
-            rounds_completed += 1
-            logging.info(
-                f"\n=========================================\n[SUCCESS] Round Completed! Total Catch Count: {rounds_completed}\n========================================="
-            )
-
-            current_state = "CAST"
+                    time.sleep(0.5)  # Allow reward window frame to render fully
+                    current_state = "STEP_1_CHECK"
             continue
 
     controller.stop_moving()
@@ -305,14 +249,11 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = AppleFishingGUI(root, worker_function=bot_loop)
 
-    # DUAL-LAYER HOTKEY BINDING:
-    # 1. Global System Hook (Works when focused inside Borderless/Windowed game)
     try:
         keyboard.add_hotkey(config.HOTKEY_TOGGLE, app.external_toggle)
     except Exception as e:
         print(f"Warning: Global hotkey initialization failed ({e}).")
 
-    # 2. Local Window Focus Hook (Guaranteed to work whenever you press F5 directly on the bot GUI panel)
     root.bind(f"<{config.HOTKEY_TOGGLE.upper()}>", lambda event: app.external_toggle())
 
     root.mainloop()
