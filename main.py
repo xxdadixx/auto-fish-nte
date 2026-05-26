@@ -107,33 +107,37 @@ def bot_loop(status_callback):
     while config.IS_RUNNING:
         frame = vision.get_screenshot()
 
-        # PRIORITY 1: DO WE SEE THE REWARD SCREEN? (Search ONLY center)
+        # PRIORITY 1: DO WE SEE THE REWARD SCREEN? (Isolate to center only)
         if vision.find_image(frame, template_reward, threshold=0.80, region="center"):
             status_callback("Reward Screen Detected! [ESC]...", "#BF5AF2")
             controller.stop_moving()
             reliable_press("escape", 0.1)
-            time.sleep(4.0)  # Safe animation delay to let character put away fish
+            time.sleep(4.0)  # Wait for put-away animation to clear cleanly
 
             rounds_completed += 1
             logging.info(f"[SUCCESS] Catch Count: {rounds_completed}")
-            cast_time = 0  # Forces immediate recast
+            cast_time = 0  # Preps instantaneous recast loop
             continue
 
-        # PRIORITY 2: DO WE SEE THE MINIGAME UI? (Search ONLY top half)
+        # PRIORITY 2: DO WE SEE THE MINIGAME UI? (Isolate to top half only)
         elif vision.find_image(
             frame, template_minigame, threshold=0.80, region="minigame"
         ):
             target_x, dash_x, target_width = vision.track_minigame(frame)
-            # ... (keep your existing tracking movement controls here) ...
+            # ... [Keep your existing move_left / move_right controller code matching step 3] ...
             continue
 
-        # PRIORITY 3: DO WE SEE THE BITE/HOOK ICON? (Search ONLY player action area)
+        # PRIORITY 3: DO WE SEE EITHER HOOK ICON? (Isolate to bottom-middle only)
         elif vision.find_image(
             frame, template_hook1, threshold=0.75, region="hook"
-        ) or vision.find_image(frame, template_hook2, threshold=0.75, region="hook"):
+        ) or (
+            template_hook2 is not None
+            and vision.find_image(frame, template_hook2, threshold=0.75, region="hook")
+        ):
+
             status_callback("Bite Detected! Confirming Game [F]...", "#34C759")
             reliable_press("f", 0.1)
-            time.sleep(0.5)  # Wait for minigame to construct
+            time.sleep(0.5)  # Buffer to allow minigame UI thread to spawn
             continue
 
         # PRIORITY 4: IF NOTHING ELSE IS ON SCREEN, WE MUST BE IDLE. CAST LINE.

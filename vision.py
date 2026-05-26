@@ -183,35 +183,39 @@ def reset_roi():
 
 
 def find_image(frame, template, threshold=0.8, region="all"):
-    """Scans a restricted region of the screen to eliminate cross-matching bugs."""
+    """Scans a restricted region of the screen using an transparency alpha-mask
+    to eliminate false-positive step overlaps entirely.
+    """
     if template is None:
         return False
 
     h, w, _ = frame.shape
 
-    # --- CRITICAL FIX: Isolate search zones to prevent wrong step detection ---
+    # --- CRITICAL FIX: Restrict boundaries to stop wrong step cross-detections ---
     if region == "center":
-        # Reward screen strictly occupies the center 50% of the screen
+        # Reward screens strictly live in the center 50% area
         search_frame = frame[
             int(h * 0.25) : int(h * 0.75), int(w * 0.25) : int(w * 0.75)
         ]
     elif region == "hook":
-        # Hook prompt strictly appears around the center player action space
+        # Hook icons always appear in the bottom-middle character action area
         search_frame = frame[
             int(h * 0.40) : int(h * 0.85), int(w * 0.35) : int(w * 0.65)
         ]
     elif region == "minigame":
-        # Minigame bar strictly populates the top 40%
+        # Minigame bar tracks pop up exclusively in the top 40% area
         search_frame = frame[0 : int(h * 0.40), 0:w]
     else:
         search_frame = frame
 
-    # Transparent background (Alpha channel) fallback handler
+    # --- CRITICAL FIX: Process transparency alpha channel as an operational mask ---
     if len(template.shape) == 3 and template.shape[2] == 4:
-        mask = template[:, :, 3]
+        mask = template[:, :, 3]  # Alpha channel transparency data
         template_bgr = template[:, :, :3]
         template_gray = cv2.cvtColor(template_bgr, cv2.COLOR_BGR2GRAY)
         frame_gray = cv2.cvtColor(search_frame, cv2.COLOR_BGR2GRAY)
+
+        # TM_CCORR_NORMED is mathematically mandatory when using an internal mask array
         result = cv2.matchTemplate(
             frame_gray, template_gray, cv2.TM_CCORR_NORMED, mask=mask
         )
