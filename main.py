@@ -9,6 +9,8 @@ import pydirectinput
 import random
 import os
 import logging
+import cv2
+import numpy as np
 
 
 class ColoredFormatter(logging.Formatter):
@@ -52,132 +54,127 @@ def reliable_press(key, duration=0.1):
 def bot_loop(status_callback):
     pydirectinput.PAUSE = 0.001
 
-    current_state = "INITIAL_SYNC"
-    last_logged_state = None
     episode_errors = []
     lost_frames = 0
     rounds_completed = 0
-    cast_time = time.time()
-    wait_time = time.time()
-
     frames_inside = 0
     total_frames_tracked = 0
-
-    current_gain = LEARNING_METRICS["optimal_gain"]
-    exploration_modifier = 1.0 + random.uniform(
-        -LEARNING_METRICS["exploration_rate"], LEARNING_METRICS["exploration_rate"]
-    )
-    active_gain = current_gain * exploration_modifier
+    cast_time = time.time()
 
     vision.reset_roi()
-    logging.info(
-        "\n=========================================\n[START] Automation engine successfully initialized.\n========================================="
-    )
+    logging.info("\n[START] Reactive Automation Engine Initialized.")
 
-    # Lock onto the window the user just clicked
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    templates_dir = os.path.join(base_dir, "templates")
+
+    # 1. Check if the templates folder itself exists
+    if not os.path.exists(templates_dir):
+        logging.error(
+            f"[!] ERROR: The 'templates' folder is missing! I looked here: {templates_dir}"
+        )
+        status_callback("Folder Missing", "#FF453A")
+        config.IS_RUNNING = False
+        return
+
+    def safe_imread(filename):
+        """Safely loads images and tells you EXACTLY what is missing."""
+        file_path = os.path.join(templates_dir, filename)
+
+        # 2. Check if the specific file exists
+        if not os.path.exists(file_path):
+            logging.error(
+                f"[!] ERROR: Missing file! I cannot find '{filename}' in the templates folder."
+            )
+            return None
+
+        try:
+            # 3. Read safely to bypass any foreign language folder bugs
+            file_bytes = np.fromfile(file_path, dtype=np.uint8)
+            img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+            if img is None:
+                logging.error(f"[!] ERROR: '{filename}' exists but is broken or empty.")
+            return img
+        except Exception as e:
+            logging.error(f"[!] ERROR: Cannot open '{filename}'. Reason: {e}")
+            return None
+
+    # Load images individually so the bot can report exactly which one failed
+    template_reward = safe_imread("reward.jpg")
+    template_minigame = safe_imread("minigame.jpg")
+    template_hook = safe_imread("hook.jpg")
+
+    # If ANY image failed to load, stop the bot
+    if template_reward is None or template_minigame is None or template_hook is None:
+        logging.error("[!] Please fix the missing files listed above and try again.")
+        status_callback("Missing Image", "#FF453A")
+        config.IS_RUNNING = False
+        return
+
     vision.lock_active_window()
 
     while config.IS_RUNNING:
-        if current_state != last_logged_state:
-            logging.info(
-                f"\n---> STEP TRANSITION: [ {last_logged_state} ] to [ {current_state} ] <---"
-            )
-            last_logged_state = current_state
-
         frame = vision.get_screenshot()
 
-        # --- STEP 1: CHECK FISHING STATUS & CAST ---
-        if current_state == "STEP_1_CHECK":
+        # PRIORITY 1: DO WE SEE THE REWARD SCREEN?
+        if vision.find_image(frame, template_reward, threshold=0.80):
+            status_callback("Reward Screen Detected! [ESC]...", "#BF5AF2")
             controller.stop_moving()
-            if not vision.check_hook_visible(frame):
-                status_callback("No Status Detected. Casting Line [F]...", "#FF9500")
-                reliable_press("f", 0.1)
-                cast_time = time.time()
-                current_state = "STEP_2_WAITING"
-                time.sleep(2.0)  # Animation lock buffer
-            else:
-                current_state = "STEP_2_WAITING"
-                time.sleep(0.5)
-            continue
+            reliable_press("escape", 0.1)
+            time.sleep(1.5)  # Wait for UI to close
 
-        # --- STEP 2: CHECK GLOWING ICON & CONFIRM MINI-GAME ---
-        if current_state == "STEP_2_WAITING":
-            target_x, dash_x, target_width = vision.track_minigame(frame)
-            if target_x is not None and dash_x is not None:
-                current_state = "STEP_3_MINIGAME"
-                lost_frames = 0
-                episode_errors = []
-                frames_inside = 0
-                total_frames_tracked = 0
-                continue
+            rounds_completed += 1
+            logging.info(f"[SUCCESS] Catch Count: {rounds_completed}")
+            continue  # Skip the rest of the loop and start over
 
-            if vision.check_hook_visible(frame):
-                status_callback("Bite Detected! Confirming Game [F]...", "#34C759")
-                reliable_press("f", 0.1)
-                current_state = "WAIT_MINIGAME_LOAD"  # Added missing transition state
-                wait_time = time.time()
-                time.sleep(0.5)
-            else:
-                status_callback(
-                    f"Waiting for Bite... ({time.time() - cast_time:.1f}s)", "#FF9500"
-                )
-                if time.time() - cast_time > 25.0:  # Safety Timeout
-                    logging.warning("\n[!] Timeout reached. Resetting back to Step 1.")
-                    current_state = "STEP_1_CHECK"
-            time.sleep(0.04)
-            continue
-
-        # --- NEW: SAFEGUARD TO WAIT FOR UI TO RENDER ---
-        if current_state == "WAIT_MINIGAME_LOAD":
-            status_callback("Waiting for Minigame UI...", "#34C759")
-            target_x, dash_x, target_width = vision.track_minigame(frame)
-            if target_x is not None and dash_x is not None:
-                current_state = "STEP_3_MINIGAME"
-                lost_frames = 0
-                episode_errors = []
-                frames_inside = 0
-                total_frames_tracked = 0
-            elif time.time() - wait_time > 3.0:  # Timeout safety net
-                current_state = "STEP_1_CHECK"
-            continue
-
-        # --- STEP 3: HIGH-SPEED TRACKING MINI-GAME ---
-        if current_state == "STEP_3_MINIGAME":
+        # PRIORITY 2: DO WE SEE THE MINIGAME UI?
+        elif vision.find_image(frame, template_minigame, threshold=0.80):
             target_x, dash_x, target_width = vision.track_minigame(frame)
 
             if target_x is not None and dash_x is not None and target_width > 0:
                 lost_frames = 0
                 distance = dash_x - target_x
-                half_width = target_width / 2.0
-                error_ratio = distance / half_width if half_width > 0 else 0
 
-                total_frames_tracked += 1
-                if abs(error_ratio) <= 1.0:
-                    frames_inside += 1
+                # The "Safe Zone" is 30% of the bar's width
+                safe_zone = target_width * 0.30
 
-                rolling_accuracy = (frames_inside / total_frames_tracked) * 100
-                status_callback(f"Tracking | Acc: {rolling_accuracy:.1f}%", "#34C759")
-
-                # Move yellow bar (dash) left (A) if it's to the right of green bar (target)
-                if dash_x > target_x + (target_width * 0.1):
+                if dash_x > target_x + safe_zone:
                     controller.move_left()
-                # Move yellow bar (dash) right (D) if it's to the left of green bar (target)
-                elif dash_x < target_x - (target_width * 0.1):
+                elif dash_x < target_x - safe_zone:
                     controller.move_right()
-                # Stop if the yellow bar has reached the green bar
                 else:
                     controller.stop_moving()
 
+                status_callback("Playing Minigame...", "#34C759")
                 time.sleep(0.001)
-                episode_errors.append(abs(distance))
             else:
+                controller.stop_moving()
                 lost_frames += 1
                 time.sleep(0.03)
-                if lost_frames >= 5:  # UI target lost; game ended
-                    controller.stop_moving()
-                    current_state = "WAITING_FOR_REWARD"
-                    wait_time = time.time()
+
             continue
+
+        # PRIORITY 3: DO WE SEE THE BITE/HOOK ICON?
+        elif vision.find_image(frame, template_hook, threshold=0.80):
+            status_callback("Bite Detected! Confirming Game [F]...", "#34C759")
+            reliable_press("f", 0.1)
+            time.sleep(0.5)  # Wait for minigame to load
+            continue
+
+        # PRIORITY 4: IF NOTHING ELSE IS ON SCREEN, WE MUST BE IDLE. CAST LINE.
+        else:
+            controller.stop_moving()
+
+            # We use a cooldown so it doesn't spam 'F' 100 times a second
+            if time.time() - cast_time > 5.0:
+                status_callback("Idle. Casting Line [F]...", "#FF9500")
+                reliable_press("f", 0.1)
+                cast_time = time.time()
+                time.sleep(2.0)  # Wait for casting animation
+            else:
+                status_callback("Waiting for Fish...", "#8E8E93")
+
+            time.sleep(0.05)
 
     controller.stop_moving()
     status_callback("Ready", "#8E8E93")

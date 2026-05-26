@@ -76,8 +76,9 @@ def check_reward_visible(frame):
     # Crop to the center 50% of the screen (ignores sky and water at the edges)
     roi_center = frame[int(h * 0.25) : int(h * 0.75), int(w * 0.25) : int(w * 0.75)]
 
-    # Tighten tolerance to avoid confusing background blues with the reward badge
-    local_tol = 20
+    # CRITICAL FIX: Increased tolerance from 20 to 60.
+    # The game has a Day/Night weather cycle that heavily shifts UI lighting.
+    local_tol = 60
     r_r, g_r, b_r = config.REWARD_BADGE_COLOR
 
     lower_reward = np.array(
@@ -96,62 +97,103 @@ def check_reward_visible(frame):
         mask_reward, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
 
-    # Check if any matching blue area is larger than 400 pixels
-    return any(cv2.contourArea(c) > 400 for c in contours_reward)
+    # CRITICAL FIX: Increased area requirement to 1000.
+    # The badge is massive, so this safely prevents false triggers from the ocean.
+    return any(cv2.contourArea(c) > 1000 for c in contours_reward)
 
 
 def track_minigame(frame):
-    """Focused mini-game bar tracking."""
+    """Dynamic ROI Tracking: Finds the UI first, then tracks elements exclusively inside it."""
     h, w, _ = frame.shape
-    search_h = int(h * 0.35)
-    crop_frame = frame[0:search_h, 0:w]
-    hsv = cv2.cvtColor(crop_frame, cv2.COLOR_BGR2HSV)
+    search_h = int(h * 0.40)  # Minigame is always in the top 40% of the screen
+
+    # --- STEP 1: Find the UI Track by locating the Green Bar ---
+    crop_top = frame[0:search_h, 0:w]
+    hsv_top = cv2.cvtColor(crop_top, cv2.COLOR_BGR2HSV)
 
     lower_target = np.array([75, 40, 40])
     upper_target = np.array([100, 255, 255])
-    lower_dash = np.array([24, 40, 40])
-    upper_dash = np.array([38, 255, 255])
-
-    mask_target = cv2.inRange(hsv, lower_target, upper_target)
-    mask_dash = cv2.inRange(hsv, lower_dash, upper_dash)
+    mask_target = cv2.inRange(hsv_top, lower_target, upper_target)
 
     contours_target, _ = cv2.findContours(
         mask_target, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
+
+    best_target = None
+    max_target_area = 0
+
+    # Filter to find the actual Green Bar (the largest horizontal green object)
+    for c in contours_target:
+        x, y, bw, bh = cv2.boundingRect(c)
+        area = bw * bh
+        if area > 50 and bw > (bh * 2):  # Must be a wide horizontal rectangle
+            if area > max_target_area:
+                max_target_area = area
+                best_target = (x, y, bw, bh)
+
+    # If we can't find the Green Bar, the UI is not visible. Stop here.
+    if best_target is None:
+        return None, None, 0
+
+    target_x, target_y, target_w, target_h = best_target
+    center_target_x = target_x + (target_w // 2)
+
+    # --- STEP 2: Lock onto the UI and find the Yellow Dash ---
+    # Now that we know EXACTLY where the UI is vertically,
+    # we create a strict horizontal slice just for the dash.
+    # We add a 10-pixel vertical buffer above and below to ensure we catch it.
+    slice_y1 = max(0, target_y - 10)
+    slice_y2 = min(search_h, target_y + target_h + 10)
+
+    # Crop the image to ONLY the tiny horizontal UI track
+    ui_slice = frame[slice_y1:slice_y2, 0:w]
+    hsv_slice = cv2.cvtColor(ui_slice, cv2.COLOR_BGR2HSV)
+
+    lower_dash = np.array([24, 40, 40])
+    upper_dash = np.array([38, 255, 255])
+    mask_dash = cv2.inRange(hsv_slice, lower_dash, upper_dash)
+
     contours_dash, _ = cv2.findContours(
         mask_dash, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
 
-    target_candidates = []
-    dash_candidates = []
+    best_dash_x = None
 
-    for c in contours_target:
-        x, y, bw, bh = cv2.boundingRect(c)
-        area = bw * bh
-        if area > 50:
-            cx = x + (bw // 2)
-            cy = y + (bh // 2)
-            target_candidates.append((cx, cy, c, area))
-
+    # Find the yellow dash inside this tiny horizontal slice
     for c in contours_dash:
         x, y, bw, bh = cv2.boundingRect(c)
         area = bw * bh
-        if area > 4:
-            cx = x + (bw // 2)
-            cy = y + (bh // 2)
-            dash_candidates.append((cx, cy, area))
 
-    target_candidates.sort(key=lambda x: x[3], reverse=True)
-    dash_candidates.sort(key=lambda x: x[2], reverse=True)
+        # The dash is a vertical line.
+        # Because our slice is so tight, background noise is basically 0.
+        if area > 4 and bh > bw:
+            # Note: Because the slice is full width (0:w),
+            # the X coordinate perfectly matches the original frame.
+            best_dash_x = x + (bw // 2)
+            break  # Found the dash, stop searching!
 
-    for tx, ty, t_contour, _ in target_candidates:
-        for dx, dy, _ in dash_candidates:
-            if abs(ty - dy) <= 100:
-                _, _, w_box, _ = cv2.boundingRect(t_contour)
-                return tx, dx, w_box
+    if best_dash_x is not None:
+        return center_target_x, best_dash_x, target_w
 
-    return None, None, 0
+    return center_target_x, None, target_w
 
 
 def reset_roi():
     pass
+
+
+def find_image(frame, template, threshold=0.8):
+    """Scans the screen to see if a specific template image is present."""
+    if template is None:
+        return False
+
+    # Convert both to grayscale to ignore minor day/night lighting changes
+    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray_template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+
+    # Search for the image
+    result = cv2.matchTemplate(gray_frame, gray_template, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, _ = cv2.minMaxLoc(result)
+
+    # If the match score is higher than our threshold (80%), we found it!
+    return max_val >= threshold
